@@ -38,7 +38,7 @@
 /* Face detection bus client name */
 #define MSM_FD_BUS_CLIENT_NAME "msm_face_detect"
 /* Face detection processing timeout in ms */
-#define MSM_FD_PROCESSING_TIMEOUT_MS 500
+#define MSM_FD_PROCESSING_TIMEOUT_MS 150
 /* Face detection halt timeout in ms */
 #define MSM_FD_HALT_TIMEOUT_MS 100
 /* Smmu callback name */
@@ -493,6 +493,14 @@ static void msm_fd_hw_halt(struct msm_fd_device *fd)
 		if (!time)
 			dev_err(fd->dev, "Face detection halt timeout\n");
 
+		/* Reset sequence after halt */
+		msm_fd_hw_write_reg(fd, MSM_FD_IOMEM_MISC, MSM_FD_MISC_SW_RESET,
+			MSM_FD_MISC_SW_RESET_SET);
+		msm_fd_hw_write_reg(fd, MSM_FD_IOMEM_CORE, MSM_FD_CONTROL,
+			MSM_FD_CONTROL_SRST);
+		msm_fd_hw_write_reg(fd, MSM_FD_IOMEM_MISC,
+			MSM_FD_MISC_SW_RESET, 0);
+		msm_fd_hw_write_reg(fd, MSM_FD_IOMEM_CORE, MSM_FD_CONTROL, 0);
 	}
 }
 
@@ -661,7 +669,7 @@ int32_t msm_fd_hw_set_dt_parms_by_name(struct msm_fd_device *fd,
 				dt_reg_settings[i + MSM_FD_REG_ADDR_OFFSET_IDX],
 				dt_reg_settings[i + MSM_FD_REG_VALUE_IDX] &
 				dt_reg_settings[i + MSM_FD_REG_MASK_IDX]);
-			pr_debug("%s:%d] %pK %08x\n", __func__, __LINE__,
+			pr_debug("%s:%d] %p %08x\n", __func__, __LINE__,
 				fd->iomem_base[base_idx] +
 				dt_reg_settings[i + MSM_FD_REG_ADDR_OFFSET_IDX],
 				dt_reg_settings[i + MSM_FD_REG_VALUE_IDX] &
@@ -830,8 +838,7 @@ int msm_fd_hw_get(struct msm_fd_device *fd, unsigned int clock_rate_idx)
 
 	if (fd->ref_count == 0) {
 		ret =
-			msm_camera_regulator_enable(fd->vdd_info,
-				fd->num_reg, true);
+			msm_camera_regulator_enable(fd->vdd, fd->num_reg, true);
 		if (ret < 0) {
 			dev_err(fd->dev, "Fail to enable vdd\n");
 			goto error;
@@ -874,7 +881,7 @@ error_set_dt:
 		fd->clk, fd->clk_num, false);
 error_clocks:
 error_bus_request:
-	msm_camera_regulator_enable(fd->vdd_info, fd->num_reg, false);
+	msm_camera_regulator_enable(fd->vdd, fd->num_reg, false);
 error:
 	mutex_unlock(&fd->lock);
 	return ret;
@@ -902,7 +909,7 @@ void msm_fd_hw_put(struct msm_fd_device *fd)
 		msm_fd_hw_bus_request(fd, 0);
 		msm_camera_clk_enable(&fd->pdev->dev, fd->clk_info,
 				fd->clk, fd->clk_num, false);
-		msm_camera_regulator_enable(fd->vdd_info, fd->num_reg, false);
+		msm_camera_regulator_enable(fd->vdd, fd->num_reg, false);
 	}
 	mutex_unlock(&fd->lock);
 }
@@ -916,7 +923,7 @@ void msm_fd_hw_put(struct msm_fd_device *fd)
  */
 static int msm_fd_hw_attach_iommu(struct msm_fd_device *fd)
 {
-	int ret = -EINVAL;
+	int ret;
 
 	mutex_lock(&fd->lock);
 
@@ -1145,6 +1152,8 @@ void msm_fd_hw_remove_buffers_from_queue(struct msm_fd_device *fd,
 		time = wait_for_completion_timeout(&active_buffer->completion,
 			msecs_to_jiffies(MSM_FD_PROCESSING_TIMEOUT_MS));
 		if (!time) {
+			/* Do a vb2 buffer done since it timed out */
+			vb2_buffer_done(&active_buffer->vb, VB2_BUF_STATE_DONE);
 			/* Remove active buffer */
 			msm_fd_hw_get_active_buffer(fd);
 			/* Schedule if other buffers are present in device */
